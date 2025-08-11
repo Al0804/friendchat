@@ -4,55 +4,18 @@ import dotenv from 'dotenv';
 dotenv.config();
 
 const pool = mysql.createPool({
-  host: process.env.DB_HOST,
-  user: process.env.DB_USER,
-  password: process.env.DB_PASSWORD,
-  database: process.env.DB_NAME,
-  port: process.env.DB_PORT || 3306,
+  host: process.env.DB_HOST || 'localhost',
+  user: process.env.DB_USER || 'root',
+  password: process.env.DB_PASSWORD || '',
+  database: process.env.DB_NAME || 'friends_chat',
   waitForConnections: true,
   connectionLimit: 10,
-  queueLimit: 0,
-  // Tambahan konfigurasi untuk Railway
-  ssl: process.env.NODE_ENV === 'production' ? { rejectUnauthorized: false } : false,
-  connectTimeout: 30000,
-  acquireTimeout: 30000,
-  timeout: 30000,
-  reconnect: true
+  queueLimit: 0
 });
 
-// Test database connection dengan retry mechanism
-const testConnection = async (retries = 5) => {
-  for (let i = 0; i < retries; i++) {
-    try {
-      const connection = await pool.getConnection();
-      console.log(`Database connected successfully (attempt ${i + 1})`);
-      connection.release();
-      return true;
-    } catch (error) {
-      console.error(`Database connection failed (attempt ${i + 1}):`, error.message);
-      if (i === retries - 1) {
-        return false;
-      }
-      // Wait before retry (exponential backoff)
-      await new Promise(resolve => setTimeout(resolve, Math.pow(2, i) * 1000));
-    }
-  }
-  return false;
-};
-
-// Initialize database tables dengan error handling yang lebih baik
+// Initialize database tables
 const initDB = async () => {
   try {
-    // Test connection dengan retry
-    const isConnected = await testConnection(5);
-    if (!isConnected) {
-      console.error('Failed to connect to database after multiple attempts');
-      // Jangan throw error, biarkan aplikasi tetap berjalan
-      return false;
-    }
-
-    console.log('Initializing database tables...');
-
     await pool.execute(`
       CREATE TABLE IF NOT EXISTS users (
         id INT AUTO_INCREMENT PRIMARY KEY,
@@ -147,6 +110,7 @@ const initDB = async () => {
       )
     `);
 
+    // Updated games table
     await pool.execute(`
       CREATE TABLE IF NOT EXISTS games (
         id INT AUTO_INCREMENT PRIMARY KEY,
@@ -172,6 +136,7 @@ const initDB = async () => {
       )
     `);
 
+    // Enhanced game_stats table
     await pool.execute(`
       CREATE TABLE IF NOT EXISTS game_stats (
         id INT AUTO_INCREMENT PRIMARY KEY,
@@ -220,14 +185,11 @@ const initDB = async () => {
       WHERE id NOT IN (SELECT user_id FROM game_stats WHERE user_id IS NOT NULL)
     `);
 
+    // Use query() instead of execute() for trigger operations
     const connection = await pool.getConnection();
     
     try {
-      // Check if trigger exists and drop it
-      const [triggers] = await connection.query('SHOW TRIGGERS LIKE "update_game_points"');
-      if (triggers.length > 0) {
-        await connection.query('DROP TRIGGER update_game_points');
-      }
+      await connection.query('DROP TRIGGER IF EXISTS update_game_points');
       
       await connection.query(`
         CREATE TRIGGER update_game_points 
@@ -247,10 +209,9 @@ const initDB = async () => {
         END
       `);
 
-      // Create or replace view
-      await connection.query('DROP VIEW IF EXISTS leaderboard_view');
+      // Create view using query() as well
       await connection.query(`
-        CREATE VIEW leaderboard_view AS
+        CREATE OR REPLACE VIEW leaderboard_view AS
         SELECT 
           u.id,
           u.username,
@@ -284,19 +245,17 @@ const initDB = async () => {
     }
 
     console.log('Database initialized successfully');
-    return true;
   } catch (error) {
-    console.error('Database initialization error:', error.message);
-    // Jangan throw error, log saja dan return false
-    return false;
+    console.error('Database initialization error:', error);
   }
 };
 
-// Helper functions for game statistics (rest of your functions remain the same)
+// Helper functions for game statistics
 const updateGameStats = async (userId, gameType, result, isBot = true) => {
   try {
     const connection = await pool.getConnection();
     
+    // Get current stats
     const [rows] = await connection.execute(
       'SELECT * FROM game_stats WHERE user_id = ?',
       [userId]
@@ -309,6 +268,7 @@ const updateGameStats = async (userId, gameType, result, isBot = true) => {
       rating: 1200
     };
 
+    // Update stats based on game result
     if (gameType === 'chess') {
       stats.chess_total_games++;
       if (result === 'win') {
@@ -336,9 +296,11 @@ const updateGameStats = async (userId, gameType, result, isBot = true) => {
       }
     }
 
+    // Update highest rating
     const newHighestRating = Math.max(stats.rating, rows[0]?.highest_rating || 1200);
 
     if (rows.length === 0) {
+      // Insert new stats
       await connection.execute(`
         INSERT INTO game_stats (
           user_id, chess_wins, chess_losses, chess_draws, chess_total_games,
@@ -353,6 +315,7 @@ const updateGameStats = async (userId, gameType, result, isBot = true) => {
         stats.rating, newHighestRating
       ]);
     } else {
+      // Update existing stats
       await connection.execute(`
         UPDATE game_stats SET
           chess_wins = ?, chess_losses = ?, chess_draws = ?, chess_total_games = ?,
@@ -446,6 +409,7 @@ const getLeaderboard = async (gameType = 'all', limit = 50) => {
     
     const [rows] = await pool.execute(query, params);
     
+    // Add rank to each row
     return rows.map((row, index) => ({
       ...row,
       rank: index + 1
@@ -477,6 +441,7 @@ const getUserGameStats = async (userId) => {
     `, [userId]);
     
     if (rows.length === 0) {
+      // Create default stats for user
       await pool.execute(`
         INSERT INTO game_stats (user_id) VALUES (?)
       `, [userId]);
@@ -497,4 +462,4 @@ const getUserGameStats = async (userId) => {
   }
 };
 
-export { pool, initDB, updateGameStats, getLeaderboard, getUserGameStats, testConnection };
+export { pool, initDB, updateGameStats, getLeaderboard, getUserGameStats };
