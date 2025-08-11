@@ -8,32 +8,47 @@ const pool = mysql.createPool({
   user: process.env.DB_USER,
   password: process.env.DB_PASSWORD,
   database: process.env.DB_NAME,
-  port: process.env.DB_PORT,
+  port: process.env.DB_PORT || 3306,
   waitForConnections: true,
   connectionLimit: 10,
-  queueLimit: 0
+  queueLimit: 0,
+  // Tambahan konfigurasi untuk Railway
+  ssl: process.env.NODE_ENV === 'production' ? { rejectUnauthorized: false } : false,
+  connectTimeout: 30000,
+  acquireTimeout: 30000,
+  timeout: 30000,
+  reconnect: true
 });
 
-// Test database connection
-const testConnection = async () => {
-  try {
-    const connection = await pool.getConnection();
-    console.log('Database connected successfully');
-    connection.release();
-    return true;
-  } catch (error) {
-    console.error('Database connection failed:', error.message);
-    return false;
+// Test database connection dengan retry mechanism
+const testConnection = async (retries = 5) => {
+  for (let i = 0; i < retries; i++) {
+    try {
+      const connection = await pool.getConnection();
+      console.log(`Database connected successfully (attempt ${i + 1})`);
+      connection.release();
+      return true;
+    } catch (error) {
+      console.error(`Database connection failed (attempt ${i + 1}):`, error.message);
+      if (i === retries - 1) {
+        return false;
+      }
+      // Wait before retry (exponential backoff)
+      await new Promise(resolve => setTimeout(resolve, Math.pow(2, i) * 1000));
+    }
   }
+  return false;
 };
 
-// Initialize database tables
+// Initialize database tables dengan error handling yang lebih baik
 const initDB = async () => {
   try {
-    // Test connection first
-    const isConnected = await testConnection();
+    // Test connection dengan retry
+    const isConnected = await testConnection(5);
     if (!isConnected) {
-      throw new Error('Cannot connect to database');
+      console.error('Failed to connect to database after multiple attempts');
+      // Jangan throw error, biarkan aplikasi tetap berjalan
+      return false;
     }
 
     console.log('Initializing database tables...');
@@ -269,9 +284,11 @@ const initDB = async () => {
     }
 
     console.log('Database initialized successfully');
+    return true;
   } catch (error) {
-    console.error('Database initialization error:', error);
-    throw error;
+    console.error('Database initialization error:', error.message);
+    // Jangan throw error, log saja dan return false
+    return false;
   }
 };
 
